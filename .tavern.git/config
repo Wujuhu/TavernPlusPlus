@@ -1,0 +1,18 @@
+[core]
+	repositoryformatversion = 1
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	worktree = C:/Users/wjh-u-win11/Downloads/TavernPlusPlus
+	symlinks = false
+	ignorecase = true
+[http]
+	sslBackend = openssl
+[remote "origin"]
+	url = https://github.com/SillyTavern/SillyTavern.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+	promisor = true
+	partialclonefilter = blob:none
+[branch "release"]
+	remote = origin
+	merge = refs/heads/release

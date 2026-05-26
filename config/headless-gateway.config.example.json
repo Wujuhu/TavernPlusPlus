@@ -1,0 +1,21 @@
+{
+    "headless": {
+        "apiToken": "",
+        "host": "127.0.0.1",
+        "port": 8001,
+        "dataRoot": "./data-headless",
+        "userHandle": "default-user",
+        "adminEnabled": false,
+        "provider": "mock",
+        "mockDelayMs": 0,
+        "openAiBaseUrl": "",
+        "openAiApiKey": "",
+        "openAiModel": "gpt-4o-mini"
+    },
+    "telegram": {
+        "enabled": true,
+        "botToken": "",
+        "registerCommands": true,
+        "pollTimeoutSeconds": 25
+    }
+}
