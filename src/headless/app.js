@@ -37,6 +37,17 @@ const upload = multer({
     },
 });
 
+function resolveUploadFilename(req) {
+    if (req.body?.filename) return req.body.filename;
+    const raw = req.file?.originalname;
+    if (!raw) return undefined;
+    try {
+        return Buffer.from(raw, 'latin1').toString('utf8');
+    } catch {
+        return raw;
+    }
+}
+
 function bearerAuth(token) {
     return (request, response, next) => {
         const header = request.get('authorization') || '';
@@ -67,7 +78,41 @@ function createErrorResponse(error) {
     return { status: 500, body: { error: error.message || 'Internal server error' } };
 }
 
-async function createSessionFromBody({ body, context, sessions }) {
+class ContextResolver {
+    #config;
+    #cache = new Map();
+    #pending = new Map();
+
+    constructor(config) {
+        this.#config = config;
+    }
+
+    async resolve(userHandle) {
+        const handle = userHandle || this.#config.userHandle || 'default-user';
+
+        if (this.#cache.has(handle)) {
+            return this.#cache.get(handle);
+        }
+
+        if (this.#pending.has(handle)) {
+            return this.#pending.get(handle);
+        }
+
+        const promise = this.#init(handle);
+        this.#pending.set(handle, promise);
+        return promise;
+    }
+
+    async #init(handle) {
+        const context = createHeadlessContext({ ...this.#config, userHandle: handle });
+        await ensureHeadlessData(context);
+        this.#cache.set(handle, context);
+        this.#pending.delete(handle);
+        return context;
+    }
+}
+
+async function createSessionFromBody({ body, context, sessions, userHandle }) {
     let chatId = body.chatId;
     let characterId = body.characterId;
 
@@ -90,6 +135,7 @@ async function createSessionFromBody({ body, context, sessions }) {
         presetId: body.presetId,
         modelProfileId: body.modelProfileId,
         worldbookIds: body.worldbookIds,
+        userHandle: userHandle || null,
     });
 }
 
@@ -105,47 +151,59 @@ async function createChatFromBody({ body, context }) {
     });
 }
 
-function createHeadlessRouter({ config, context, sessions, generations }) {
+function createHeadlessRouter({ config, contextResolver, defaultContext, sessions, generations }) {
     const router = express.Router();
 
     router.use(bearerAuth(config.token));
+
+    router.use(asyncRoute(async (request, response, next) => {
+        const userHandle = request.headers['x-user-handle'];
+        request.headlessContext = userHandle
+            ? await contextResolver.resolve(userHandle)
+            : defaultContext;
+        next();
+    }));
+
+    const ctx = (req) => req.headlessContext;
+
     router.get('/openapi.json', (request, response) => response.json(openApiDocument));
     router.get('/health', (request, response) => response.json({
         ok: true,
         mode: 'headless',
-        dataRoot: context.dataRoot,
+        dataRoot: ctx(request).dataRoot,
         provider: config.provider,
     }));
 
-    router.get('/characters', asyncRoute(async (request, response) => response.json(await listCharacters(context))));
-    router.post('/characters', asyncRoute(async (request, response) => response.status(201).json(await createCharacter(context, request.body))));
+    router.get('/characters', asyncRoute(async (request, response) => response.json(await listCharacters(ctx(request)))));
+    router.post('/characters', asyncRoute(async (request, response) => response.status(201).json(await createCharacter(ctx(request), request.body))));
     router.post('/characters/import', upload.single('file'), asyncRoute(async (request, response) => {
         if (!request.file) {
             return response.status(400).json({ error: 'PNG character card file is required.' });
         }
 
-        const character = await importCharacterCard(context, {
+        const character = await importCharacterCard(ctx(request), {
             buffer: request.file.buffer,
-            filename: request.file.originalname,
+            filename: resolveUploadFilename(request),
             id: request.body?.id,
         });
         return response.status(201).json(character);
     }));
-    router.get('/characters/:id', asyncRoute(async (request, response) => response.json(await readCharacter(context, request.params.id))));
+    router.get('/characters/:id', asyncRoute(async (request, response) => response.json(await readCharacter(ctx(request), request.params.id))));
 
-    router.get('/chats', asyncRoute(async (request, response) => response.json(await listChats(context))));
-    router.post('/chats', asyncRoute(async (request, response) => response.status(201).json(await createChatFromBody({ body: request.body, context }))));
+    router.get('/chats', asyncRoute(async (request, response) => response.json(await listChats(ctx(request)))));
+    router.post('/chats', asyncRoute(async (request, response) => response.status(201).json(await createChatFromBody({ body: request.body, context: ctx(request) }))));
     router.post('/chats/:id/messages', asyncRoute(async (request, response) => {
-        const message = await appendChatMessage(context, request.params.id, request.body);
+        const message = await appendChatMessage(ctx(request), request.params.id, request.body);
         return response.status(201).json(message);
     }));
     router.post('/chats/:id/regenerate', asyncRoute(async (request, response) => {
-        const chat = await readChat(context, request.params.id);
+        const chat = await readChat(ctx(request), request.params.id);
         const session = sessions.create({
             characterId: request.body?.characterId || chat.characterId,
             chatId: request.params.id,
             worldbookIds: request.body?.worldbookIds,
             presetId: request.body?.presetId,
+            userHandle: request.headers['x-user-handle'] || null,
         });
         const task = generations.start(session, {
             mode: 'regenerate',
@@ -155,12 +213,13 @@ function createHeadlessRouter({ config, context, sessions, generations }) {
         return response.status(202).json({ ...task, events: `/api/headless/v1/generations/${task.id}/events` });
     }));
     router.post('/chats/:id/continue', asyncRoute(async (request, response) => {
-        const chat = await readChat(context, request.params.id);
+        const chat = await readChat(ctx(request), request.params.id);
         const session = sessions.create({
             characterId: request.body?.characterId || chat.characterId,
             chatId: request.params.id,
             worldbookIds: request.body?.worldbookIds,
             presetId: request.body?.presetId,
+            userHandle: request.headers['x-user-handle'] || null,
         });
         const task = generations.start(session, {
             mode: 'continue',
@@ -169,15 +228,15 @@ function createHeadlessRouter({ config, context, sessions, generations }) {
         });
         return response.status(202).json({ ...task, events: `/api/headless/v1/generations/${task.id}/events` });
     }));
-    router.get('/chats/:id', asyncRoute(async (request, response) => response.json(await readChat(context, request.params.id))));
+    router.get('/chats/:id', asyncRoute(async (request, response) => response.json(await readChat(ctx(request), request.params.id))));
 
-    router.get('/presets', asyncRoute(async (request, response) => response.json(await listPresets(context, request.query.apiId))));
-    router.post('/presets', asyncRoute(async (request, response) => response.status(201).json(await createPreset(context, request.body))));
+    router.get('/presets', asyncRoute(async (request, response) => response.json(await listPresets(ctx(request), request.query.apiId))));
+    router.post('/presets', asyncRoute(async (request, response) => response.status(201).json(await createPreset(ctx(request), request.body))));
     router.post('/presets/import', upload.single('file'), asyncRoute(async (request, response) => {
-        const preset = await importPresetJson(context, {
+        const preset = await importPresetJson(ctx(request), {
             apiId: request.body?.apiId || 'openai',
             name: request.body?.name,
-            filename: request.file?.originalname || request.body?.filename,
+            filename: resolveUploadFilename(request),
             buffer: request.file?.buffer,
             text: request.body?.json,
             data: request.body?.preset,
@@ -185,13 +244,19 @@ function createHeadlessRouter({ config, context, sessions, generations }) {
         return response.status(201).json(preset);
     }));
 
-    router.get('/model-profiles', asyncRoute(async (request, response) => response.json(await listModelProfiles(context))));
-    router.post('/model-profiles', asyncRoute(async (request, response) => response.status(201).json(await createModelProfile(context, request.body))));
-    router.get('/model-profiles/:id', asyncRoute(async (request, response) => response.json(await readModelProfile(context, request.params.id))));
-    router.put('/model-profiles/:id', asyncRoute(async (request, response) => response.json(await updateModelProfile(context, request.params.id, request.body))));
+    router.get('/model-profiles', asyncRoute(async (request, response) => {
+        const includeSecret = request.query.includeSecret === 'true';
+        return response.json(await listModelProfiles(ctx(request), { includeSecret }));
+    }));
+    router.post('/model-profiles', asyncRoute(async (request, response) => response.status(201).json(await createModelProfile(ctx(request), request.body))));
+    router.get('/model-profiles/:id', asyncRoute(async (request, response) => {
+        const includeSecret = request.query.includeSecret === 'true';
+        return response.json(await readModelProfile(ctx(request), request.params.id, { includeSecret }));
+    }));
+    router.put('/model-profiles/:id', asyncRoute(async (request, response) => response.json(await updateModelProfile(ctx(request), request.params.id, request.body))));
 
-    router.get('/worldbooks', asyncRoute(async (request, response) => response.json(await listWorldbooks(context))));
-    router.post('/worldbooks', asyncRoute(async (request, response) => response.status(201).json(await createWorldbook(context, request.body))));
+    router.get('/worldbooks', asyncRoute(async (request, response) => response.json(await listWorldbooks(ctx(request)))));
+    router.post('/worldbooks', asyncRoute(async (request, response) => response.status(201).json(await createWorldbook(ctx(request), request.body))));
 
     router.get('/sessions', (request, response) => response.json(sessions.list()));
     router.get('/sessions/:id', (request, response) => {
@@ -203,7 +268,12 @@ function createHeadlessRouter({ config, context, sessions, generations }) {
         return response.json(session);
     });
     router.post('/sessions', asyncRoute(async (request, response) => {
-        const session = await createSessionFromBody({ body: request.body || {}, context, sessions });
+        const session = await createSessionFromBody({
+            body: request.body || {},
+            context: ctx(request),
+            sessions,
+            userHandle: request.headers['x-user-handle'] || null,
+        });
         return response.status(201).json(session);
     }));
     router.post('/sessions/:id/config', (request, response) => {
@@ -268,12 +338,13 @@ export async function createHeadlessApp(overrides = {}) {
     const config = resolveHeadlessConfig(overrides);
     globalThis.DATA_ROOT = config.dataRoot;
 
-    const context = createHeadlessContext(config);
-    await ensureHeadlessData(context);
+    const contextResolver = new ContextResolver(config);
+    const defaultContext = await contextResolver.resolve();
 
     const sessions = new SessionStore();
     const provider = overrides.providerAdapter || createGenerationProvider(config);
-    const generations = new GenerationManager({ context, provider });
+    const resolveContext = (handle) => contextResolver.resolve(handle);
+    const generations = new GenerationManager({ context: defaultContext, resolveContext, provider });
     const app = express();
 
     app.disable('x-powered-by');
@@ -281,7 +352,7 @@ export async function createHeadlessApp(overrides = {}) {
     app.use(compression());
     app.use(express.json({ limit: '50mb' }));
     app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-    app.use('/api/headless/v1', createHeadlessRouter({ config, context, sessions, generations }));
+    app.use('/api/headless/v1', createHeadlessRouter({ config, contextResolver, defaultContext, sessions, generations }));
 
     if (config.adminEnabled) {
         app.use(createAdminRouter({ config, generations, sessions }));
@@ -293,7 +364,7 @@ export async function createHeadlessApp(overrides = {}) {
         return response.status(result.status).json(result.body);
     });
 
-    return { app, config, context, sessions, generations };
+    return { app, config, context: defaultContext, sessions, generations };
 }
 
 export async function startHeadlessServer(overrides = {}) {

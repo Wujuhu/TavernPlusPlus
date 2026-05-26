@@ -86,6 +86,7 @@ async function openAiGenerate({ messages, signal, options, onToken, config }) {
         throw new Error('openAiBaseUrl and openAiApiKey are required for the openai provider.');
     }
 
+    const fetchFn = config.fetchImpl || globalThis.fetch;
     const baseUrl = config.openAiBaseUrl.replace(/\/+$/, '');
     const url = baseUrl.endsWith('/chat/completions') ? baseUrl : `${baseUrl}/chat/completions`;
     const model = options?.model || config.openAiModel;
@@ -106,7 +107,7 @@ async function openAiGenerate({ messages, signal, options, onToken, config }) {
     const chatCompletionSource = settings.chat_completion_source;
     const showThoughts = Boolean(settings.show_thoughts);
     const replyState = createStreamingReplyState();
-    const response = await fetch(url, {
+    const response = await fetchFn(url, {
         method: 'POST',
         signal,
         headers: {
@@ -193,6 +194,7 @@ export function createGenerationProvider(config) {
             openAiBaseUrl: profile.baseUrl || config.openAiBaseUrl,
             openAiApiKey: profile.apiKey || config.openAiApiKey,
             openAiModel: profile.model || config.openAiModel,
+            fetchImpl: config.fetchImpl,
         };
 
         if (runtimeConfig.provider === 'openai') {
@@ -209,11 +211,14 @@ export class SessionStore {
     create(input) {
         const session = {
             id: input.id || crypto.randomUUID(),
+            userHandle: input.userHandle || null,
             characterId: input.characterId,
             chatId: input.chatId,
             presetId: input.presetId || null,
             modelProfileId: input.modelProfileId || null,
             worldbookIds: Array.isArray(input.worldbookIds) ? input.worldbookIds : [],
+            personaDescription: input.personaDescription || '',
+            worldInfoSettings: input.worldInfoSettings || {},
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
         };
@@ -236,11 +241,14 @@ export class SessionStore {
             return null;
         }
 
+        if ('userHandle' in input) session.userHandle = input.userHandle || null;
         if ('characterId' in input) session.characterId = input.characterId;
         if ('chatId' in input) session.chatId = input.chatId;
         if ('presetId' in input) session.presetId = input.presetId;
         if ('modelProfileId' in input) session.modelProfileId = input.modelProfileId;
         if ('worldbookIds' in input) session.worldbookIds = Array.isArray(input.worldbookIds) ? input.worldbookIds : [];
+        if ('personaDescription' in input) session.personaDescription = input.personaDescription;
+        if ('worldInfoSettings' in input) session.worldInfoSettings = input.worldInfoSettings || {};
         session.updatedAt = new Date().toISOString();
         this.#sessions.set(id, session);
         return session;
@@ -250,8 +258,8 @@ export class SessionStore {
 export class GenerationManager {
     #tasks = new Map();
 
-    constructor({ context, provider }) {
-        this.context = context;
+    constructor({ context, resolveContext, provider }) {
+        this.resolveContext = resolveContext || (() => context);
         this.provider = provider;
     }
 
@@ -339,27 +347,39 @@ export class GenerationManager {
 
     async #run(task) {
         try {
+            const context = await this.resolveContext(task.session.userHandle);
+
             if (task.mode === 'regenerate') {
-                await removeLastAssistantMessage(this.context, task.session.chatId);
+                await removeLastAssistantMessage(context, task.session.chatId);
             }
 
             if (task.input && task.mode !== 'continue') {
-                await appendChatMessage(this.context, task.session.chatId, {
+                await appendChatMessage(context, task.session.chatId, {
                     name: 'User',
                     is_user: true,
                     mes: task.input,
                 });
             }
 
-            const chat = await readChat(this.context, task.session.chatId);
-            const character = await readCharacter(this.context, task.session.characterId || chat.characterId);
-            const preset = task.session.presetId ? await readPreset(this.context, task.session.presetId) : null;
-            const modelProfile = task.session.modelProfileId ? await readModelProfile(this.context, task.session.modelProfileId, { includeSecret: true }) : null;
+            const chat = await readChat(context, task.session.chatId);
+            const character = await readCharacter(context, task.session.characterId || chat.characterId);
+            const preset = task.session.presetId ? await readPreset(context, task.session.presetId) : null;
+            const modelProfile = task.session.modelProfileId ? await readModelProfile(context, task.session.modelProfileId, { includeSecret: true }) : null;
             const worldbooks = [];
 
             for (const worldbookId of task.session.worldbookIds) {
-                worldbooks.push(await readWorldbook(this.context, worldbookId));
+                worldbooks.push(await readWorldbook(context, worldbookId));
             }
+
+            const presetObj = preset?.preset || preset || {};
+            const mergedParams = {
+                ...(modelProfile?.parameters || {}),
+                ...(presetObj || {}),
+                ...task.options,
+            };
+            const maxContext = Number(mergedParams.openai_max_context || mergedParams.max_context || 8192);
+            const maxResponse = Number(mergedParams.openai_max_tokens || mergedParams.max_tokens || 1024);
+            const modelName = modelProfile?.model || mergedParams.model || '';
 
             const prompt = compilePrompt({
                 character,
@@ -367,10 +387,15 @@ export class GenerationManager {
                 worldbooks,
                 preset,
                 input: task.input,
+                maxContext,
+                maxResponse,
+                model: modelName,
+                personaDescription: task.session.personaDescription || '',
+                worldInfoSettings: task.session.worldInfoSettings || {},
+                generationType: task.mode === 'continue' ? 'continue' : task.mode === 'regenerate' ? 'regenerate' : 'normal',
             });
             const options = {
-                ...(modelProfile?.parameters || {}),
-                ...(prompt.preset || {}),
+                ...mergedParams,
                 ...task.options,
                 userName: chat.header?.user_name || 'User',
                 charName: character.name || 'Assistant',
@@ -396,7 +421,7 @@ export class GenerationManager {
 
             const finalText = task.content || result || '';
             if (finalText) {
-                const assistant = await appendChatMessage(this.context, task.session.chatId, {
+                const assistant = await appendChatMessage(context, task.session.chatId, {
                     name: character.name || 'Assistant',
                     is_user: false,
                     mes: finalText,
@@ -409,9 +434,10 @@ export class GenerationManager {
         } catch (error) {
             if (isAbortError(error)) {
                 if (task.savePartial && task.content) {
-                    const chat = await readChat(this.context, task.session.chatId);
-                    const character = await readCharacter(this.context, task.session.characterId || chat.characterId);
-                    const assistant = await appendChatMessage(this.context, task.session.chatId, {
+                    const context = await this.resolveContext(task.session.userHandle);
+                    const chat = await readChat(context, task.session.chatId);
+                    const character = await readCharacter(context, task.session.characterId || chat.characterId);
+                    const assistant = await appendChatMessage(context, task.session.chatId, {
                         name: character.name || 'Assistant',
                         is_user: false,
                         mes: task.content,

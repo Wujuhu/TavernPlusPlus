@@ -1,0 +1,19 @@
+FROM node:lts-alpine
+
+RUN apk add --no-cache tini git
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci --omit=dev --no-audit --no-fund --no-progress && npm cache clean --force
+
+COPY . .
+
+RUN mkdir -p config data-headless
+
+ENV NODE_ENV=production
+
+EXPOSE 8001
+
+ENTRYPOINT ["tini", "--"]
+CMD ["node", "src/combined-main.js"]

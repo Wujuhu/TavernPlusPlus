@@ -42,7 +42,9 @@ function getDefaultConfig() {
             botToken: '',
             registerCommands: true,
             pollTimeoutSeconds: 25,
+            allowedUserIds: [],
         },
+        proxy: '',
     };
 }
 
@@ -58,6 +60,7 @@ function mergeConfig(base, user) {
             ...base.telegram,
             ...(user.telegram || {}),
         },
+        proxy: user.proxy ?? base.proxy,
     };
 }
 

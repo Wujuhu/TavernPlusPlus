@@ -65,19 +65,25 @@ async function collectSse(response) {
 }
 
 export class HeadlessClient {
-    constructor({ baseUrl, token, fetchImpl = fetch }) {
+    constructor({ baseUrl, token, fetchImpl = fetch, userHandle }) {
         this.baseUrl = baseUrl;
         this.token = token;
         this.fetch = fetchImpl;
+        this.userHandle = userHandle || null;
+    }
+
+    #headers(extra = {}) {
+        return {
+            Authorization: `Bearer ${this.token}`,
+            ...(this.userHandle ? { 'X-User-Handle': this.userHandle } : {}),
+            ...extra,
+        };
     }
 
     async request(method, route, body = undefined) {
         const response = await this.fetch(makeUrl(this.baseUrl, route), {
             method,
-            headers: {
-                Authorization: `Bearer ${this.token}`,
-                ...(body ? { 'Content-Type': 'application/json' } : {}),
-            },
+            headers: this.#headers(body ? { 'Content-Type': 'application/json' } : {}),
             body: body ? JSON.stringify(body) : undefined,
         });
 
@@ -98,18 +104,19 @@ export class HeadlessClient {
 
     async upload(route, { buffer, filename, fields = {} }) {
         const form = new FormData();
+        if (filename) {
+            form.set('filename', filename);
+        }
         for (const [key, value] of Object.entries(fields)) {
             if (value !== undefined && value !== null) {
                 form.set(key, String(value));
             }
         }
-        form.set('file', new Blob([buffer]), filename);
+        form.set('file', new Blob([buffer]), filename || 'upload.bin');
 
         const response = await this.fetch(makeUrl(this.baseUrl, route), {
             method: 'POST',
-            headers: {
-                Authorization: `Bearer ${this.token}`,
-            },
+            headers: this.#headers(),
             body: form,
         });
 
@@ -149,7 +156,7 @@ export class HeadlessClient {
         const origin = new URL(this.baseUrl).origin;
         const eventsUrl = task.events.startsWith('/api/') ? `${origin}${task.events}` : makeUrl(this.baseUrl, task.events);
         const response = await this.fetch(eventsUrl, {
-            headers: { Authorization: `Bearer ${this.token}` },
+            headers: this.#headers(),
         });
 
         if (!response.ok) {
@@ -157,5 +164,57 @@ export class HeadlessClient {
         }
 
         return collectSse(response);
+    }
+
+    async *generateStream(sessionId, input) {
+        const task = await this.post('/generate', { sessionId, input });
+        const origin = new URL(this.baseUrl).origin;
+        const eventsUrl = task.events.startsWith('/api/') ? `${origin}${task.events}` : makeUrl(this.baseUrl, task.events);
+        yield* this.streamEvents(eventsUrl);
+    }
+
+    async *streamEvents(eventsUrl) {
+        const url = eventsUrl.startsWith('http') ? eventsUrl : (() => {
+            const origin = new URL(this.baseUrl).origin;
+            return eventsUrl.startsWith('/api/') ? `${origin}${eventsUrl}` : makeUrl(this.baseUrl, eventsUrl);
+        })();
+
+        const response = await this.fetch(url, {
+            headers: this.#headers(),
+        });
+
+        if (!response.ok) {
+            throw new Error(`SSE stream failed: ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const blocks = buffer.split('\n\n');
+            buffer = blocks.pop() || '';
+
+            for (const block of blocks) {
+                const event = block.match(/^event: (.+)$/m)?.[1];
+                const data = block.match(/^data: (.+)$/m)?.[1];
+                if (!event || !data) continue;
+
+                const payload = JSON.parse(data);
+                if (event === 'token') {
+                    yield { type: 'token', token: payload.token || '' };
+                }
+                if (event === 'error') {
+                    yield { type: 'error', message: payload?.message || JSON.stringify(payload) };
+                }
+                if (event === 'done') {
+                    yield { type: 'done', task: payload };
+                }
+            }
+        }
     }
 }

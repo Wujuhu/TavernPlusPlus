@@ -15,6 +15,7 @@ class FakeTelegram {
     constructor(files = {}) {
         this.files = files;
         this.messages = [];
+        this.edits = [];
         this.commands = [];
     }
 
@@ -27,9 +28,18 @@ class FakeTelegram {
         return true;
     }
 
+    async sendChatAction(chatId, action) {
+        return true;
+    }
+
     async sendMessage(chatId, text) {
         this.messages.push({ chatId, text });
         return { message_id: this.messages.length };
+    }
+
+    async editMessageText(chatId, messageId, text) {
+        this.edits.push({ chatId, messageId, text });
+        return true;
     }
 
     async downloadFile(fileId) {
@@ -97,6 +107,7 @@ function messageUpdate(chatId, body) {
         update_id: Date.now(),
         message: {
             message_id: Date.now(),
+            from: { id: chatId },
             chat: { id: chatId },
             ...body,
         },
@@ -112,13 +123,11 @@ test('Telegram gateway imports files, guides photo uploads, saves model profiles
             'help',
             'status',
             'setmodel',
-            'models',
             'model',
-            'characters',
             'character',
-            'presets',
             'preset',
             'newchat',
+            'retry',
         ]);
 
         const createdCharacter = await requestJson(baseUrl, 'POST', '/characters', {
@@ -132,7 +141,7 @@ test('Telegram gateway imports files, guides photo uploads, saves model profiles
         await gateway.handleUpdate(messageUpdate(1001, {
             photo: [{ file_id: 'compressed-photo' }],
         }));
-        assert.match(telegram.messages.at(-1).text, /not as a file/);
+        assert.match(telegram.messages.at(-1).text, /而非文件/);
 
         await gateway.handleUpdate(messageUpdate(1001, {
             document: {
@@ -141,14 +150,25 @@ test('Telegram gateway imports files, guides photo uploads, saves model profiles
                 mime_type: 'image/png',
             },
         }));
-        assert.match(telegram.messages.at(-1).text, /Character card imported and selected/);
+        // Pre-created via API, so this is already an update
+        assert.match(telegram.messages.at(-1).text, /角色卡已更新并选中/);
         assert.ok(store.getChat(1001).characterId);
         const importedCharacterId = store.getChat(1001).characterId;
+
+        // Re-import same card again: still "已更新"
+        await gateway.handleUpdate(messageUpdate(1001, {
+            document: {
+                file_id: 'card',
+                file_name: 'gateway-ava.png',
+                mime_type: 'image/png',
+            },
+        }));
+        assert.match(telegram.messages.at(-1).text, /角色卡已更新并选中/);
 
         await gateway.handleUpdate(messageUpdate(1001, {
             text: '/character',
         }));
-        assert.match(telegram.messages.at(-1).text, /Usage: \/character ID or \/character number/);
+        assert.match(telegram.messages.at(-1).text, /1\./);
         assert.equal(store.getChat(1001).characterId, importedCharacterId);
 
         await gateway.handleUpdate(messageUpdate(1001, {
@@ -158,27 +178,46 @@ test('Telegram gateway imports files, guides photo uploads, saves model profiles
                 mime_type: 'application/json',
             },
         }));
-        assert.match(telegram.messages.at(-1).text, /Preset imported and selected/);
+        assert.match(telegram.messages.at(-1).text, /预设已导入并选中/);
         assert.equal(store.getChat(1001).presetId, 'openai:telegram-preset');
         const importedPresetId = store.getChat(1001).presetId;
+
+        // Re-import same preset: should say "已更新"
+        await gateway.handleUpdate(messageUpdate(1001, {
+            document: {
+                file_id: 'preset',
+                file_name: 'telegram-preset.json',
+                mime_type: 'application/json',
+            },
+        }));
+        assert.match(telegram.messages.at(-1).text, /预设已更新并选中/);
 
         await gateway.handleUpdate(messageUpdate(1001, {
             text: '/preset',
         }));
-        assert.match(telegram.messages.at(-1).text, /Usage: \/preset ID or \/preset number/);
+        assert.match(telegram.messages.at(-1).text, /1\./);
         assert.equal(store.getChat(1001).presetId, importedPresetId);
 
         await gateway.handleUpdate(messageUpdate(1001, {
             text: '/setmodel main http://example.invalid/v1 sk-test gpt-test',
         }));
-        assert.match(telegram.messages.at(-1).text, /Model profile saved and selected/);
+        assert.match(telegram.messages.at(-1).text, /模型配置已创建并选中/);
         const openAiProfileId = store.getChat(1001).modelProfileId;
         assert.ok(openAiProfileId);
+
+        // Re-setmodel same name: should say "已更新"
+        await gateway.handleUpdate(messageUpdate(1001, {
+            text: '/setmodel main http://example.invalid/v1 sk-new gpt-test-2',
+        }));
+        assert.match(telegram.messages.at(-1).text, /模型配置已更新并选中/);
+        assert.equal(store.getChat(1001).modelProfileId, openAiProfileId, 'Same model profile ID after upsert');
 
         await gateway.handleUpdate(messageUpdate(1001, {
             text: '/model',
         }));
-        assert.match(telegram.messages.at(-1).text, /Usage: \/model ID or \/model number/);
+        const modelListMsg = telegram.messages.at(-1).text;
+        assert.match(modelListMsg, /1\./);
+        assert.match(modelListMsg, /\[当前\]/);
         assert.equal(store.getChat(1001).modelProfileId, openAiProfileId);
 
         const mockProfile = await requestJson(baseUrl, 'POST', '/model-profiles', {
@@ -198,10 +237,14 @@ test('Telegram gateway imports files, guides photo uploads, saves model profiles
         assert.ok(store.getChat(1001).characterId);
         assert.notEqual(store.getChat(1001).characterId, 'undefined');
 
+        telegram.edits = [];
         await gateway.handleUpdate(messageUpdate(1001, {
             text: 'hello from telegram',
         }));
-        assert.equal(telegram.messages.at(-1).text, 'gateway answer');
+
+        const lastEdit = telegram.edits.at(-1);
+        assert.ok(lastEdit, 'Expected at least one edit for streaming response');
+        assert.equal(lastEdit.text, 'gateway answer');
 
         const state = store.getChat(1001);
         assert.ok(state.chatId);
@@ -222,9 +265,65 @@ test('Telegram gateway reports generation backend errors to the chat', async () 
             text: 'hello from telegram',
         }));
 
-        assert.equal(telegram.messages.at(-2).text, 'Generating...');
-        assert.match(telegram.messages.at(-1).text, /Operation failed: backend exploded/);
+        const lastEdit = telegram.edits.at(-1);
+        assert.ok(lastEdit, 'Expected error to be shown via edit');
+        assert.match(lastEdit.text, /操作失败：backend exploded/);
     }, async () => {
         throw new Error('backend exploded');
+    });
+});
+
+test('Telegram gateway rejects users not in the whitelist', async () => {
+    await withGateway(async ({ gateway, telegram }) => {
+        gateway.config.allowedUserIds = [9999];
+
+        await gateway.handleUpdate(messageUpdate(1234, {
+            text: 'hello',
+        }));
+
+        assert.match(telegram.messages.at(-1).text, /访问被拒绝/);
+    });
+});
+
+test('model-profiles API supports includeSecret query param', async () => {
+    await withGateway(async ({ baseUrl }) => {
+        await requestJson(baseUrl, 'POST', '/model-profiles', {
+            name: 'secret-test',
+            provider: 'openai',
+            apiKey: 'sk-secret-12345678',
+            model: 'gpt-4o',
+        });
+
+        const withoutSecret = await requestJson(baseUrl, 'GET', '/model-profiles');
+        assert.equal(withoutSecret[0].apiKey, undefined);
+        assert.equal(withoutSecret[0].hasApiKey, true);
+
+        const withSecret = await requestJson(baseUrl, 'GET', '/model-profiles?includeSecret=true');
+        assert.equal(withSecret[0].apiKey, 'sk-secret-12345678');
+    });
+});
+
+test('createModelProfile upserts by name instead of creating duplicates', async () => {
+    await withGateway(async ({ baseUrl }) => {
+        const first = await requestJson(baseUrl, 'POST', '/model-profiles', {
+            name: 'upsert-test',
+            provider: 'openai',
+            model: 'gpt-4o',
+            apiKey: 'key-1',
+        });
+        assert.equal(first.updated, false);
+
+        const second = await requestJson(baseUrl, 'POST', '/model-profiles', {
+            name: 'upsert-test',
+            provider: 'openai',
+            model: 'gpt-4o-mini',
+            apiKey: 'key-2',
+        });
+        assert.equal(second.updated, true);
+        assert.equal(second.id, first.id, 'Same ID after upsert');
+        assert.equal(second.model, 'gpt-4o-mini');
+
+        const all = await requestJson(baseUrl, 'GET', '/model-profiles');
+        assert.equal(all.length, 1, 'No duplicate profiles');
     });
 });

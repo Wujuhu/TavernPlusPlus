@@ -1,6 +1,6 @@
 import { applyTextMacros } from '../macros.js';
 
-const DEFAULT_CHAT_COMPLETION_PROMPTS = [
+export const DEFAULT_CHAT_COMPLETION_PROMPTS = [
     {
         name: 'Main Prompt',
         system_prompt: true,
@@ -80,7 +80,7 @@ const DEFAULT_CHAT_COMPLETION_PROMPTS = [
     },
 ];
 
-const DEFAULT_PROMPT_ORDER = [
+export const DEFAULT_PROMPT_ORDER = [
     { identifier: 'main', enabled: true },
     { identifier: 'worldInfoBefore', enabled: true },
     { identifier: 'personaDescription', enabled: true },
@@ -99,7 +99,7 @@ function clone(value) {
     return structuredClone(value);
 }
 
-function getPromptDefinitions(preset = {}) {
+export function getPromptDefinitions(preset = {}) {
     const prompts = new Map(DEFAULT_CHAT_COMPLETION_PROMPTS.map(prompt => [prompt.identifier, clone(prompt)]));
 
     for (const prompt of preset.prompts || []) {
@@ -111,7 +111,7 @@ function getPromptDefinitions(preset = {}) {
     return prompts;
 }
 
-function getPromptOrder(preset = {}) {
+export function getPromptOrder(preset = {}) {
     const promptOrder = Array.isArray(preset.prompt_order) ? preset.prompt_order : [];
     const defaultOrder = promptOrder.find(order => String(order.character_id) === '100001')?.order ||
         promptOrder.find(order => String(order.character_id) === '100000')?.order ||
@@ -124,7 +124,7 @@ function stringFormat(format, value) {
     return String(format || '{0}').replace(/\{0\}/g, value);
 }
 
-function formatWorldInfo(value, wiFormat = '{0}') {
+export function formatWorldInfo(value, wiFormat = '{0}') {
     if (!value) {
         return '';
     }
@@ -183,7 +183,7 @@ function parseExampleIntoIndividual(messageExampleString, { userName, charName }
     return result;
 }
 
-function buildExampleMessages(mesExample, macroContext) {
+export function buildExampleMessages(mesExample, macroContext) {
     const examples = parseMesExamples(applyTextMacros(mesExample, macroContext));
     return examples.flatMap(example => parseExampleIntoIndividual(example, {
         userName: macroContext.userName,
@@ -191,7 +191,7 @@ function buildExampleMessages(mesExample, macroContext) {
     }));
 }
 
-function toChatHistoryMessage(message, macroContext, namesBehavior = 0) {
+export function toChatHistoryMessage(message, macroContext, namesBehavior = 0) {
     let content = applyTextMacros(message.mes || '', macroContext).replace(/\r/gm, '');
     if (namesBehavior === 2 && message.name) {
         content = `${message.name}: ${content}`;
@@ -217,6 +217,7 @@ export function buildChatCompletionPromptMessages({
     chatMessages = [],
     macroContext,
     namesBehavior = 0,
+    personaDescription = '',
 } = {}) {
     const promptDefinitions = getPromptDefinitions(preset);
     const promptOrder = getPromptOrder(preset);
@@ -226,6 +227,7 @@ export function buildChatCompletionPromptMessages({
         ['charDescription', { role: 'system', content: charDescription, identifier: 'charDescription' }],
         ['charPersonality', { role: 'system', content: charPersonality && preset.personality_format ? applyTextMacros(preset.personality_format, { ...macroContext, personality: charPersonality }) : charPersonality, identifier: 'charPersonality' }],
         ['scenario', { role: 'system', content: scenario && preset.scenario_format ? applyTextMacros(preset.scenario_format, { ...macroContext, scenario }) : scenario, identifier: 'scenario' }],
+        ['personaDescription', { role: 'system', content: personaDescription, identifier: 'personaDescription' }],
     ]);
     const messages = [];
 

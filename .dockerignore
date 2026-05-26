@@ -22,16 +22,22 @@
 # --- The Folders ---
 /backups
 /cache
+/_cache
 /colab
 /data
+/data-headless
 /dist
 /node_modules
 /tests
+/.tmp-headless-tests
+.tavern.git
 
 # --- Sensitive Info ---
 **/.env*
 **/*.pem
 **/certs
+secrets.json
+/config/headless-gateway.config.json
 
 # --- Documentation ---
 readme*

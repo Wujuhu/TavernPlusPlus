@@ -69,5 +69,6 @@ export function resolveHeadlessConfig(overrides = {}) {
         openAiBaseUrl,
         openAiApiKey,
         openAiModel,
+        fetchImpl: overrides.fetchImpl || undefined,
     };
 }

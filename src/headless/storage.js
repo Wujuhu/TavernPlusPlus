@@ -34,7 +34,7 @@ function safeName(value, fallback = 'item') {
 function slugify(value, fallback = 'item') {
     const normalized = safeName(value, fallback)
         .replace(/\s+/g, '-')
-        .replace(/[^a-zA-Z0-9_.-]/g, '-')
+        .replace(/[^\p{L}\p{N}_.-]/gu, '-')
         .replace(/-+/g, '-')
         .replace(/^-|-$/g, '');
 
@@ -293,10 +293,15 @@ export async function importCharacterCard(context, input) {
     const buffer = Buffer.isBuffer(input.buffer) ? input.buffer : Buffer.from(input.buffer);
     const metadata = JSON.parse(readCharacterCardMetadata(buffer));
     const cardName = metadata?.data?.name || metadata?.name || path.basename(input.filename || 'character', CHARACTER_EXTENSION);
-    const filePath = await getUniquePath(context.user.directories.characters, input.id || cardName, CHARACTER_EXTENSION);
+    const baseName = slugify(input.id || cardName);
+    const directPath = path.join(context.user.directories.characters, `${baseName}${CHARACTER_EXTENSION}`);
+    await fs.promises.mkdir(context.user.directories.characters, { recursive: true });
+    const updated = fs.existsSync(directPath);
 
-    writeFileAtomicSync(filePath, buffer);
-    return toCharacterView(metadata, path.basename(filePath));
+    writeFileAtomicSync(directPath, buffer);
+    const view = toCharacterView(metadata, path.basename(directPath));
+    view.updated = updated;
+    return view;
 }
 
 export async function readCharacter(context, id) {
@@ -382,9 +387,10 @@ export async function createPreset(context, input) {
     const name = safeName(input?.name, 'preset');
     const location = getPresetLocation(context.user.directories, apiId);
     const filePath = path.join(location.folder, `${name}${location.extension}`);
+    const updated = fs.existsSync(filePath);
 
     writeFileAtomicSync(filePath, JSON.stringify(input?.preset || {}, null, 4));
-    return { id: `${apiId}:${name}`, apiId, name, preset: input?.preset || {} };
+    return { id: `${apiId}:${name}`, apiId, name, preset: input?.preset || {}, updated };
 }
 
 export async function importPresetJson(context, input) {
@@ -417,17 +423,23 @@ export async function readModelProfile(context, id, options = {}) {
 
 export async function createModelProfile(context, input) {
     const profiles = await readJsonFile(getModelProfilesPath(context), []);
-    let profile = normalizeModelProfile(input);
-    const takenIds = new Set(profiles.map(item => item.id));
-    let suffix = 1;
-    while (takenIds.has(profile.id)) {
-        profile = { ...profile, id: `${slugify(input?.id || input?.name || 'model')}-${suffix}` };
-        suffix++;
+    const targetName = safeName(input?.name || 'model');
+    const existingIndex = profiles.findIndex(p => p.name === targetName);
+
+    if (existingIndex !== -1) {
+        profiles[existingIndex] = normalizeModelProfile(input, profiles[existingIndex]);
+        await writeJsonFile(getModelProfilesPath(context), profiles);
+        const result = toPublicModelProfile(profiles[existingIndex]);
+        result.updated = true;
+        return result;
     }
 
+    const profile = normalizeModelProfile(input);
     profiles.push(profile);
     await writeJsonFile(getModelProfilesPath(context), profiles);
-    return toPublicModelProfile(profile);
+    const result = toPublicModelProfile(profile);
+    result.updated = false;
+    return result;
 }
 
 export async function updateModelProfile(context, id, input) {

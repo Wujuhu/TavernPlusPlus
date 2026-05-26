@@ -18,5 +18,7 @@ export function resolveTelegramGatewayConfig(options = {}) {
         headlessToken: options.headlessToken || '',
         registerCommands: options.registerCommands !== false,
         pollTimeoutSeconds: getNumber(options.pollTimeoutSeconds, 25),
+        fetchImpl: options.fetchImpl || undefined,
+        allowedUserIds: Array.isArray(options.allowedUserIds) ? options.allowedUserIds.map(Number) : [],
     };
 }

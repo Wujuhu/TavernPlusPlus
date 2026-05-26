@@ -37,6 +37,20 @@ export class TelegramApi {
         });
     }
 
+    editMessageText(chatId, messageId, text, extra = {}) {
+        return this.call('editMessageText', {
+            chat_id: chatId,
+            message_id: messageId,
+            text,
+            disable_web_page_preview: true,
+            ...extra,
+        });
+    }
+
+    sendChatAction(chatId, action = 'typing') {
+        return this.call('sendChatAction', { chat_id: chatId, action });
+    }
+
     setMyCommands(commands) {
         return this.call('setMyCommands', { commands });
     }

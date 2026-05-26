@@ -16,6 +16,8 @@
         "enabled": true,
         "botToken": "",
         "registerCommands": true,
-        "pollTimeoutSeconds": 25
-    }
+        "pollTimeoutSeconds": 25,
+        "allowedUserIds": []
+    },
+    "proxy": ""
 }
