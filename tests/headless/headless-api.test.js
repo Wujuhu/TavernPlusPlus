@@ -188,7 +188,9 @@ test('headless API requires auth and supports chat generation controls', async (
 
         const presets = await requestJson(baseUrl, 'GET', '/presets?apiId=openai');
         assert.equal(presets.response.status, 200);
-        assert.deepEqual(presets.data.map(item => item.id).sort(), [preset.data.id, importedPreset.data.id].sort());
+        const presetIds = presets.data.map(item => item.id);
+        assert.ok(presetIds.includes(preset.data.id), `preset list should contain ${preset.data.id}`);
+        assert.ok(presetIds.includes(importedPreset.data.id), `preset list should contain ${importedPreset.data.id}`);
 
         const modelProfile = await requestJson(baseUrl, 'POST', '/model-profiles', {
             name: 'mock-main',

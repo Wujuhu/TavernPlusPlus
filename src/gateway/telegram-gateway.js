@@ -283,6 +283,8 @@ export class TelegramGateway {
         const ctx = { chatId, userId, threadId, stateKey };
 
         try {
+            await this.#ensureDefaultPreset(ctx);
+
             console.log(`Telegram update ${update.update_id}: chat=${chatId} user=${userId} thread=${threadId ?? 'none'} type=${getMessageKind(message)}`);
 
             if (message.document) {
@@ -686,6 +688,17 @@ export class TelegramGateway {
 
     // ── state helpers ───────────────────────────────────────────────
 
+    async #ensureDefaultPreset(ctx) {
+        const state = this.store.getChat(ctx.stateKey);
+        if (state.presetId) return;
+
+        const headless = this.#getHeadless(ctx.userId);
+        const presets = await headless.get('/presets?apiId=openai');
+        if (presets.length > 0) {
+            this.store.updateChat(ctx.stateKey, { presetId: presets[0].id });
+        }
+    }
+
     async #prepareState(ctx, headless) {
         const state = this.store.getChat(ctx.stateKey);
 
@@ -695,13 +708,6 @@ export class TelegramGateway {
                 state.characterId = characters[0].id;
             } else {
                 throw new Error('请先上传一张 PNG 角色卡，或使用 /character 查看列表后选择。');
-            }
-        }
-
-        if (!state.presetId) {
-            const presets = await headless.get('/presets?apiId=openai');
-            if (presets.length > 0) {
-                state.presetId = presets[0].id;
             }
         }
 
