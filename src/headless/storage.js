@@ -10,6 +10,7 @@ import { DEFAULT_AVATAR_PATH, DEFAULT_USER, USER_DIRECTORY_TEMPLATE } from '../c
 import { parse, read as readCharacterCardMetadata, write } from '../character-card-parser.js';
 import { serverDirectory } from '../server-directory.js';
 import { applyTextMacros } from './macros.js';
+import { loadDefaultPresets } from './default-presets.js';
 
 const CHARACTER_EXTENSION = '.png';
 const CHAT_EXTENSION = '.jsonl';
@@ -266,6 +267,19 @@ export async function ensureHeadlessData(context) {
     await fs.promises.mkdir(context.dataRoot, { recursive: true });
     for (const directory of Object.values(context.user.directories)) {
         await fs.promises.mkdir(directory, { recursive: true });
+    }
+
+    await seedDefaultPresets(context);
+}
+
+async function seedDefaultPresets(context) {
+    for (const entry of loadDefaultPresets()) {
+        const location = getPresetLocation(context.user.directories, entry.apiId || 'openai');
+        const filePath = path.join(location.folder, `${safeName(entry.name)}${location.extension}`);
+        if (!fs.existsSync(filePath)) {
+            writeFileAtomicSync(filePath, JSON.stringify(entry.preset, null, 4));
+            console.log(`Seeded default preset: ${entry.apiId}:${entry.name}`);
+        }
     }
 }
 

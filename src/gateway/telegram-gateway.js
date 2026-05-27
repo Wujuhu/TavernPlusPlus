@@ -698,6 +698,13 @@ export class TelegramGateway {
             }
         }
 
+        if (!state.presetId) {
+            const presets = await headless.get('/presets?apiId=openai');
+            if (presets.length > 0) {
+                state.presetId = presets[0].id;
+            }
+        }
+
         if (!state.chatId) {
             const chat = await headless.post('/chats', {
                 characterId: state.characterId,
