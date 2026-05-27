@@ -28,12 +28,12 @@ class FakeTelegram {
         return true;
     }
 
-    async sendChatAction(chatId, action) {
+    async sendChatAction(_chatId, _action, _extra = {}) {
         return true;
     }
 
-    async sendMessage(chatId, text) {
-        this.messages.push({ chatId, text });
+    async sendMessage(chatId, text, extra = {}) {
+        this.messages.push({ chatId, text, threadId: extra.message_thread_id ?? null });
         return { message_id: this.messages.length };
     }
 
@@ -102,13 +102,14 @@ async function requestJson(baseUrl, method, route, body = undefined) {
     return response.json();
 }
 
-function messageUpdate(chatId, body) {
+function messageUpdate(chatId, body, threadId = undefined) {
     return {
         update_id: Date.now(),
         message: {
             message_id: Date.now(),
             from: { id: chatId },
             chat: { id: chatId },
+            ...(threadId !== undefined ? { message_thread_id: threadId } : {}),
             ...body,
         },
     };
@@ -120,7 +121,6 @@ test('Telegram gateway imports files, guides photo uploads, saves model profiles
         gateway.stop();
         assert.deepEqual(telegram.commands.map(item => item.command), [
             'start',
-            'help',
             'status',
             'setmodel',
             'model',
@@ -150,12 +150,10 @@ test('Telegram gateway imports files, guides photo uploads, saves model profiles
                 mime_type: 'image/png',
             },
         }));
-        // Pre-created via API, so this is already an update
         assert.match(telegram.messages.at(-1).text, /角色卡已更新并选中/);
         assert.ok(store.getChat(1001).characterId);
         const importedCharacterId = store.getChat(1001).characterId;
 
-        // Re-import same card again: still "已更新"
         await gateway.handleUpdate(messageUpdate(1001, {
             document: {
                 file_id: 'card',
@@ -182,7 +180,6 @@ test('Telegram gateway imports files, guides photo uploads, saves model profiles
         assert.equal(store.getChat(1001).presetId, 'openai:telegram-preset');
         const importedPresetId = store.getChat(1001).presetId;
 
-        // Re-import same preset: should say "已更新"
         await gateway.handleUpdate(messageUpdate(1001, {
             document: {
                 file_id: 'preset',
@@ -205,7 +202,6 @@ test('Telegram gateway imports files, guides photo uploads, saves model profiles
         const openAiProfileId = store.getChat(1001).modelProfileId;
         assert.ok(openAiProfileId);
 
-        // Re-setmodel same name: should say "已更新"
         await gateway.handleUpdate(messageUpdate(1001, {
             text: '/setmodel main http://example.invalid/v1 sk-new gpt-test-2',
         }));
@@ -325,5 +321,81 @@ test('createModelProfile upserts by name instead of creating duplicates', async 
 
         const all = await requestJson(baseUrl, 'GET', '/model-profiles');
         assert.equal(all.length, 1, 'No duplicate profiles');
+    });
+});
+
+test('messages with message_thread_id are routed to separate state and replies include threadId', async () => {
+    await withGateway(async ({ baseUrl, gateway, telegram, store }) => {
+        const mockProfile = await requestJson(baseUrl, 'POST', '/model-profiles', {
+            name: 'thread-mock',
+            provider: 'mock',
+            model: 'mock',
+            parameters: { mockResponse: 'thread reply' },
+        });
+
+        // Set model in thread 100
+        await gateway.handleUpdate(messageUpdate(5001, { text: `/model ${mockProfile.id}` }, 100));
+        assert.match(telegram.messages.at(-1).text, /已切换模型配置/);
+        assert.equal(telegram.messages.at(-1).threadId, 100, 'Reply should include thread 100');
+
+        // Thread 100 state has the model
+        const t100State = store.getChat('5001_t100');
+        assert.equal(t100State.modelProfileId, mockProfile.id);
+
+        // Default state (no thread) should be empty
+        const defaultState = store.getChat('5001');
+        assert.equal(defaultState.modelProfileId, undefined);
+
+        // Set model in thread 200
+        await gateway.handleUpdate(messageUpdate(5001, { text: `/model ${mockProfile.id}` }, 200));
+        assert.equal(telegram.messages.at(-1).threadId, 200, 'Reply should include thread 200');
+        const t200State = store.getChat('5001_t200');
+        assert.equal(t200State.modelProfileId, mockProfile.id);
+
+        // Thread 100 and 200 states are independent
+        assert.notEqual(
+            store.getChat('5001_t100').updatedAt,
+            store.getChat('5001_t200').updatedAt,
+            'Thread states should be independent store entries',
+        );
+
+        // Messages without threadId go to default state
+        await gateway.handleUpdate(messageUpdate(5001, { text: `/model ${mockProfile.id}` }));
+        assert.equal(telegram.messages.at(-1).threadId, null, 'No threadId for default');
+        assert.equal(store.getChat('5001').modelProfileId, mockProfile.id);
+    });
+});
+
+test('conversation in a thread uses isolated chat history', async () => {
+    await withGateway(async ({ baseUrl, gateway, telegram, store }) => {
+        await requestJson(baseUrl, 'POST', '/characters', {
+            name: 'Thread Char',
+            description: 'Thread test.',
+        });
+
+        const mockProfile = await requestJson(baseUrl, 'POST', '/model-profiles', {
+            name: 'thread-conv-mock',
+            provider: 'mock',
+            model: 'mock',
+            parameters: { mockResponse: 'hello from thread' },
+        });
+
+        // Configure thread 42
+        await gateway.handleUpdate(messageUpdate(6001, { text: `/model ${mockProfile.id}` }, 42));
+        await gateway.handleUpdate(messageUpdate(6001, { text: '/character 1' }, 42));
+
+        // Chat in thread 42
+        telegram.edits = [];
+        await gateway.handleUpdate(messageUpdate(6001, { text: 'hi thread 42' }, 42));
+        assert.ok(telegram.edits.length > 0, 'Should have streaming edits');
+        assert.equal(telegram.edits.at(-1).text, 'hello from thread');
+
+        // Thread 42 has a chatId, default does not
+        const t42State = store.getChat('6001_t42');
+        assert.ok(t42State.chatId, 'Thread 42 should have a chatId');
+        assert.ok(t42State.sessionId, 'Thread 42 should have a sessionId');
+
+        const defaultState = store.getChat('6001');
+        assert.equal(defaultState.chatId, undefined, 'Default thread should have no chatId');
     });
 });

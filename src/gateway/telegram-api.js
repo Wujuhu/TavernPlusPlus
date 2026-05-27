@@ -5,19 +5,28 @@ export class TelegramApi {
         this.baseUrl = `https://api.telegram.org/bot${token}`;
     }
 
-    async call(method, payload = {}) {
-        const response = await this.fetch(`${this.baseUrl}/${method}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        const data = await response.json();
+    async call(method, payload = {}, retries = 3) {
+        for (let attempt = 0; ; attempt++) {
+            const response = await this.fetch(`${this.baseUrl}/${method}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
 
-        if (!response.ok || !data.ok) {
+            if (data.ok) {
+                return data.result;
+            }
+
+            if (data.error_code === 429 && attempt < retries) {
+                const wait = Math.min((data.parameters?.retry_after ?? 1) * 1000, 30000);
+                console.warn(`Telegram 429 on ${method}: retrying in ${wait}ms (attempt ${attempt + 1}/${retries})`);
+                await new Promise(r => setTimeout(r, wait));
+                continue;
+            }
+
             throw new Error(`Telegram API ${method} failed: ${JSON.stringify(data)}`);
         }
-
-        return data.result;
     }
 
     getUpdates({ offset, timeout }) {
@@ -47,8 +56,8 @@ export class TelegramApi {
         });
     }
 
-    sendChatAction(chatId, action = 'typing') {
-        return this.call('sendChatAction', { chat_id: chatId, action });
+    sendChatAction(chatId, action = 'typing', extra = {}) {
+        return this.call('sendChatAction', { chat_id: chatId, action, ...extra });
     }
 
     setMyCommands(commands) {
