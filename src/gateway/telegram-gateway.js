@@ -151,6 +151,7 @@ function computeStateKey(chatId, threadId) {
 
 export class TelegramGateway {
     #userClients = new Map();
+    #queues = new Map();
 
     constructor({ config, telegram, headless, store }) {
         this.config = config;
@@ -220,9 +221,11 @@ export class TelegramGateway {
                     timeout: this.config.pollTimeoutSeconds,
                 });
 
-                for (const update of updates) {
-                    await this.handleUpdate(update);
-                    this.store.setOffset(update.update_id + 1);
+                if (updates.length > 0) {
+                    this.store.setOffset(updates.at(-1).update_id + 1);
+                    for (const update of updates) {
+                        this.#dispatch(update);
+                    }
                 }
             } catch (error) {
                 if (!this.running) {
@@ -232,6 +235,28 @@ export class TelegramGateway {
                 await sleep(3000);
             }
         }
+    }
+
+    #dispatch(update) {
+        const message = update.message;
+        if (!message) return;
+
+        const chatId = getChatId(message);
+        if (!chatId) return;
+
+        const threadId = getThreadId(message);
+        const key = threadId != null ? `${chatId}_t${threadId}` : String(chatId);
+
+        const prev = this.#queues.get(key) || Promise.resolve();
+        const next = prev
+            .then(() => this.handleUpdate(update))
+            .catch(err => console.error(`Unhandled error in update ${update.update_id}:`, err))
+            .finally(() => {
+                if (this.#queues.get(key) === next) {
+                    this.#queues.delete(key);
+                }
+            });
+        this.#queues.set(key, next);
     }
 
     // ── public entry point ──────────────────────────────────────────
