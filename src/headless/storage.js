@@ -503,6 +503,22 @@ export async function createChat(context, input = {}) {
     return readChat(context, encodeChatId(path.relative(context.user.directories.chats, filePath)));
 }
 
+function recentRounds(messages, rounds = 2, maxLen = 40) {
+    const result = [];
+    let count = 0;
+    for (let i = messages.length - 1; i >= 0 && count < rounds * 2; i--) {
+        const m = messages[i];
+        if (!m.mes) continue;
+        const text = m.mes.replace(/\n/g, ' ').trim();
+        result.unshift({
+            is_user: Boolean(m.is_user),
+            preview: text.length > maxLen ? text.slice(0, maxLen - 1) + '…' : text,
+        });
+        count++;
+    }
+    return result;
+}
+
 export async function listChats(context) {
     const chats = [];
 
@@ -521,6 +537,7 @@ export async function listChats(context) {
                     characterId: chat.characterId,
                     messageCount: chat.messages.length,
                     updatedAt: chat.updatedAt,
+                    recentMessages: recentRounds(chat.messages),
                 });
             }
         }

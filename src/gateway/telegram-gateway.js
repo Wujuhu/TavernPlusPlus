@@ -6,12 +6,13 @@ import { TelegramApi } from './telegram-api.js';
 
 export const TELEGRAM_BOT_COMMANDS = Object.freeze([
     { command: 'start', description: '查看使用说明和配置流程' },
+    { command: 'chats', description: '查看或切换历史对话' },
+    { command: 'newchat', description: '开始新对话' },
     { command: 'status', description: '查看当前配置状态' },
     { command: 'setmodel', description: '保存并选择模型 API 配置' },
     { command: 'model', description: '查看或切换模型配置' },
     { command: 'character', description: '查看或切换角色卡' },
     { command: 'preset', description: '查看或切换预设' },
-    { command: 'newchat', description: '开始新对话' },
     { command: 'retry', description: '重新生成上一条回复' },
 ]);
 
@@ -138,6 +139,27 @@ function maskApiKey(key) {
     if (!key) return '未配置';
     if (key.length <= 8) return '***';
     return `${key.slice(0, 4)}***${key.slice(-4)}`;
+}
+
+function formatChatTime(timestamp) {
+    const d = new Date(timestamp);
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const sameYear = d.getFullYear() === now.getFullYear();
+    const sameDay = sameYear
+        && d.getMonth() === now.getMonth()
+        && d.getDate() === now.getDate();
+    if (sameDay) return `今天 ${time}`;
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (d.getFullYear() === yesterday.getFullYear()
+        && d.getMonth() === yesterday.getMonth()
+        && d.getDate() === yesterday.getDate()) {
+        return `昨天 ${time}`;
+    }
+    const date = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    return sameYear ? `${date} ${time}` : `${d.getFullYear()}-${date} ${time}`;
 }
 
 /**
@@ -364,7 +386,7 @@ export class TelegramGateway {
 
         switch (command) {
             case '/start':
-                await this.#sendMsg(ctx, [
+                await this.#sendSafe(ctx, [
                     '🍺 SillyTavern 酒馆网关',
                     '',
                     '━━ 首次配置流程 ━━',
@@ -385,19 +407,18 @@ export class TelegramGateway {
                     '',
                     '━━ 所有命令 ━━',
                     '',
+                    '/newchat — 开始新对话',
+                    '/chats — 查看历史对话 · /chats 序号 切换',      
+                    '/status — 查看当前配置状态',                                  
                     '/setmodel — 配置模型 API（名称 URL 密钥 模型名）',
                     '/model — 查看模型列表 · /model 序号 切换',
                     '/character — 查看角色列表 · /character 序号 切换',
                     '/preset — 查看预设列表 · /preset 序号 切换',
-                    '/newchat — 开始新对话',
                     '/retry — 重新生成上一条回复',
-                    '/status — 查看当前配置状态',
                     '',
                     '━━ 提示 ━━',
                     '',
                     '• 同名角色卡/预设会自动覆盖更新，不会重复创建',
-                    '• 参数中含空格时可用 | 分隔：/setmodel 名称|URL|密钥|模型名',
-                    '• 群聊话题和 Bot 线程中的对话互相隔离',
                 ].join('\n'));
                 return;
             case '/status':
@@ -429,6 +450,13 @@ export class TelegramGateway {
                 return;
             case '/newchat':
                 await this.#handleNewChat(ctx, headless);
+                return;
+            case '/chats':
+                if (arg) {
+                    await this.#selectChatHistory(ctx, headless, arg);
+                } else {
+                    await this.#sendChatHistory(ctx, headless);
+                }
                 return;
             case '/retry':
                 await this.#handleRetry(ctx, headless);
@@ -808,6 +836,80 @@ export class TelegramGateway {
         }));
     }
 
+    async #sendChatHistory(ctx, headless) {
+        const state = this.store.getChat(ctx.stateKey);
+        const allChats = await headless.get('/chats');
+
+        if (!allChats.length) {
+            await this.#sendMsg(ctx, '暂无历史对话。');
+            return;
+        }
+
+        const charNames = new Map();
+        for (const chat of allChats) {
+            if (chat.characterId && !charNames.has(chat.characterId)) {
+                try {
+                    const char = await headless.get(`/characters/${chat.characterId}`);
+                    charNames.set(chat.characterId, char.name);
+                } catch {
+                    charNames.set(chat.characterId, chat.characterId);
+                }
+            }
+        }
+
+        const display = allChats.slice(0, 20);
+        const lines = [
+            '📋 历史对话列表',
+            '/chats 序号 — 切换到该对话',
+            '',
+        ];
+
+        for (let i = 0; i < display.length; i++) {
+            const chat = display[i];
+            const mark = chat.id === state.chatId ? ' [当前]' : '';
+            const charName = charNames.get(chat.characterId) || '未知角色';
+            const time = formatChatTime(chat.updatedAt);
+            lines.push(`${i + 1}. ${charName} · ${chat.messageCount}条消息 · ${time}${mark}`);
+
+            if (Array.isArray(chat.recentMessages)) {
+                for (const m of chat.recentMessages) {
+                    lines.push(`   ${m.is_user ? '👤' : '🤖'} ${m.preview}`);
+                }
+            }
+            lines.push('');
+        }
+
+        if (allChats.length > 20) {
+            lines.push(`（仅显示最近 20 条，共 ${allChats.length} 条对话）`);
+        }
+
+        await this.#sendSafe(ctx, lines.join('\n'));
+    }
+
+    async #selectChatHistory(ctx, headless, arg) {
+        const allChats = await headless.get('/chats');
+        const selected = resolveSelection(allChats, arg);
+
+        if (!selected) {
+            await this.#sendMsg(ctx, `未找到对话：${arg}\n使用 /chats 查看可用列表。`);
+            return;
+        }
+
+        this.store.updateChat(ctx.stateKey, {
+            chatId: selected.id,
+            characterId: selected.characterId,
+            sessionId: null,
+        });
+
+        let charName = selected.characterId;
+        try {
+            const char = await headless.get(`/characters/${selected.characterId}`);
+            charName = char.name;
+        } catch {}
+
+        await this.#sendMsg(ctx, `已切换到对话：${charName}（${selected.messageCount}条消息）\n直接发消息即可继续对话。`);
+    }
+
     async #sendStatus(ctx, headless) {
         const state = this.store.getChat(ctx.stateKey);
         const lines = ['当前配置状态', ''];
@@ -868,6 +970,6 @@ export class TelegramGateway {
 
         lines.push(`对话：${state.chatId ? '进行中' : '未创建'}`);
 
-        await this.#sendMsg(ctx, lines.join('\n'));
+        await this.#sendSafe(ctx, lines.join('\n'));
     }
 }
