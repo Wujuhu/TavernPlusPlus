@@ -603,3 +603,27 @@ export async function removeLastAssistantMessage(context, chatId) {
 
     return null;
 }
+
+export async function rewindChat(context, chatId) {
+    const chat = await readChat(context, chatId);
+    const messages = [...chat.messages];
+    const removed = [];
+
+    if (messages.length === 0) {
+        return { removed, remaining: 0 };
+    }
+
+    const last = messages[messages.length - 1];
+
+    if (!last.is_user) {
+        removed.unshift(messages.pop());
+        if (messages.length > 0 && messages[messages.length - 1].is_user) {
+            removed.unshift(messages.pop());
+        }
+    } else {
+        removed.unshift(messages.pop());
+    }
+
+    await rewriteChatMessages(context, chatId, messages);
+    return { removed, remaining: messages.length };
+}

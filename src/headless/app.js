@@ -27,6 +27,7 @@ import {
     readCharacter,
     readChat,
     readModelProfile,
+    rewindChat,
     updateModelProfile,
 } from './storage.js';
 
@@ -203,6 +204,7 @@ function createHeadlessRouter({ config, contextResolver, defaultContext, session
             chatId: request.params.id,
             worldbookIds: request.body?.worldbookIds,
             presetId: request.body?.presetId,
+            modelProfileId: request.body?.modelProfileId,
             userHandle: request.headers['x-user-handle'] || null,
         });
         const task = generations.start(session, {
@@ -219,6 +221,7 @@ function createHeadlessRouter({ config, contextResolver, defaultContext, session
             chatId: request.params.id,
             worldbookIds: request.body?.worldbookIds,
             presetId: request.body?.presetId,
+            modelProfileId: request.body?.modelProfileId,
             userHandle: request.headers['x-user-handle'] || null,
         });
         const task = generations.start(session, {
@@ -229,6 +232,7 @@ function createHeadlessRouter({ config, contextResolver, defaultContext, session
         return response.status(202).json({ ...task, events: `/api/headless/v1/generations/${task.id}/events` });
     }));
     router.get('/chats/:id', asyncRoute(async (request, response) => response.json(await readChat(ctx(request), request.params.id))));
+    router.post('/chats/:id/rewind', asyncRoute(async (request, response) => response.json(await rewindChat(ctx(request), request.params.id))));
 
     router.get('/presets', asyncRoute(async (request, response) => response.json(await listPresets(ctx(request), request.query.apiId))));
     router.post('/presets', asyncRoute(async (request, response) => response.status(201).json(await createPreset(ctx(request), request.body))));

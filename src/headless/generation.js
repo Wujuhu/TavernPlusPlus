@@ -188,9 +188,12 @@ async function openAiGenerate({ messages, signal, options, onToken, config }) {
 export function createGenerationProvider(config) {
     return request => {
         const profile = request.modelProfile || {};
+        const effectiveProvider = profile.provider
+            || (profile.baseUrl ? 'openai' : null)
+            || config.provider;
         const runtimeConfig = {
             ...config,
-            provider: profile.provider || config.provider,
+            provider: effectiveProvider,
             openAiBaseUrl: profile.baseUrl || config.openAiBaseUrl,
             openAiApiKey: profile.apiKey || config.openAiApiKey,
             openAiModel: profile.model || config.openAiModel,

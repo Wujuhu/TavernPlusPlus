@@ -14,6 +14,7 @@ export const TELEGRAM_BOT_COMMANDS = Object.freeze([
     { command: 'character', description: '查看或切换角色卡' },
     { command: 'preset', description: '查看或切换预设' },
     { command: 'retry', description: '重新生成上一条回复' },
+    { command: 'rewind', description: '撤销上一轮对话' },
 ]);
 
 const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
@@ -415,6 +416,7 @@ export class TelegramGateway {
                     '/character — 查看角色列表 · /character 序号 切换',
                     '/preset — 查看预设列表 · /preset 序号 切换',
                     '/retry — 重新生成上一条回复',
+                    '/rewind — 撤销上一轮对话',
                     '',
                     '━━ 提示 ━━',
                     '',
@@ -460,6 +462,9 @@ export class TelegramGateway {
                 return;
             case '/retry':
                 await this.#handleRetry(ctx, headless);
+                return;
+            case '/rewind':
+                await this.#handleRewind(ctx, headless);
                 return;
             default:
                 await this.#sendMsg(ctx, '未知命令，发送 /help 查看帮助。');
@@ -521,17 +526,25 @@ export class TelegramGateway {
 
     async #handleConversation(ctx, text) {
         console.log(`Telegram conversation message: chat=${ctx.chatId} length=${text.length}`);
-        const headless = this.#getHeadless(ctx.userId);
-        const hadChat = Boolean(this.store.getChat(ctx.stateKey).chatId);
-        const state = await this.#prepareState(ctx, headless);
-        const sessionId = await headless.ensureSession(state);
-        this.store.updateChat(ctx.stateKey, { sessionId });
+        const stopTyping = this.#startTypingLoop(ctx);
 
-        if (!hadChat) {
-            await this.#sendGreeting(ctx, headless, state.chatId);
+        try {
+            const headless = this.#getHeadless(ctx.userId);
+            const hadChat = Boolean(this.store.getChat(ctx.stateKey).chatId);
+            const state = await this.#prepareState(ctx, headless);
+            const sessionId = await headless.ensureSession(state);
+            this.store.updateChat(ctx.stateKey, { sessionId });
+
+            if (!hadChat) {
+                await this.#sendGreeting(ctx, headless, state.chatId);
+            }
+
+            stopTyping();
+            await this.#streamGeneration(ctx, headless, sessionId, text);
+        } catch (error) {
+            stopTyping();
+            throw error;
         }
-
-        await this.#streamGeneration(ctx, headless, sessionId, text);
     }
 
     async #handleNewChat(ctx, headless) {
@@ -562,25 +575,74 @@ export class TelegramGateway {
 
     async #handleRetry(ctx, headless) {
         const state = this.store.getChat(ctx.stateKey);
-        if (!state.chatId || !state.sessionId) {
+        if (!state.chatId) {
             await this.#sendMsg(ctx, '当前没有进行中的对话，无法重新生成。');
             return;
         }
 
-        try {
-            const result = await headless.post(`/chats/${state.chatId}/regenerate`, {
-                characterId: state.characterId,
-                presetId: state.presetId,
-                modelProfileId: state.modelProfileId,
-            });
+        const stopTyping = this.#startTypingLoop(ctx);
 
-            const eventsUrl = result.events;
-            if (!eventsUrl) {
-                await this.#sendMsg(ctx, '重新生成请求已提交。');
+        try {
+            const chat = await headless.get(`/chats/${state.chatId}`);
+            const messages = chat.messages || [];
+
+            if (messages.length === 0) {
+                stopTyping();
+                await this.#sendMsg(ctx, '对话中没有消息，无法重新生成。');
                 return;
             }
 
-            await this.#streamFromEvents(ctx, headless, eventsUrl);
+            const last = messages[messages.length - 1];
+
+            if (!last.is_user) {
+                const result = await headless.post(`/chats/${state.chatId}/regenerate`, {
+                    characterId: state.characterId,
+                    presetId: state.presetId,
+                    modelProfileId: state.modelProfileId,
+                });
+
+                const eventsUrl = result.events;
+                if (!eventsUrl) {
+                    stopTyping();
+                    await this.#sendMsg(ctx, '重新生成请求已提交。');
+                    return;
+                }
+
+                stopTyping();
+                await this.#streamFromEvents(ctx, headless, eventsUrl);
+            } else {
+                const userText = last.mes;
+                await headless.post(`/chats/${state.chatId}/rewind`);
+                const sessionId = await headless.ensureSession(state);
+                this.store.updateChat(ctx.stateKey, { sessionId });
+                stopTyping();
+                await this.#streamGeneration(ctx, headless, sessionId, userText);
+            }
+        } catch (error) {
+            stopTyping();
+            await this.#sendSafe(ctx, formatTelegramError(error));
+        }
+    }
+
+    async #handleRewind(ctx, headless) {
+        const state = this.store.getChat(ctx.stateKey);
+        if (!state.chatId) {
+            await this.#sendMsg(ctx, '当前没有进行中的对话，无法撤销。');
+            return;
+        }
+
+        try {
+            const result = await headless.post(`/chats/${state.chatId}/rewind`);
+            const removed = result.removed || [];
+
+            if (removed.length === 0) {
+                await this.#sendMsg(ctx, '对话中没有可撤销的消息。');
+                return;
+            }
+
+            const desc = removed.map(m => m.is_user ? '👤 用户消息' : '🤖 模型回复').join(' + ');
+            this.store.updateChat(ctx.stateKey, { sessionId: null });
+            await this.#sendMsg(ctx, `已撤销${removed.length}条消息（${desc}），剩余${result.remaining}条消息。`);
         } catch (error) {
             await this.#sendSafe(ctx, formatTelegramError(error));
         }
